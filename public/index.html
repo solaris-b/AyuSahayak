@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title> Doctor Dashboard</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      max-width: 800px;
+      margin: 40px auto;
+      padding: 20px;
+    }
+    select, textarea, input, button {
+      font-size: 1em;
+      width: 100%;
+      margin-top: 10px;
+      padding: 10px;
+    }
+    .card {
+      background: #f4f4f4;
+      padding: 20px;
+      margin-top: 20px;
+      border-radius: 8px;
+    }
+    h1 { display: flex; align-items: center; gap: 10px; }
+    h2 { margin-top: 30px; }
+    label { font-weight: bold; margin-top: 10px; display: block; }
+    pre {
+      background: #eee;
+      padding: 10px;
+      white-space: pre-wrap;
+      border-radius: 5px;
+    }
+  </style>
+</head>
+<body>
+
+  <h1> Doctor Dashboard</h1>
+
+  <label for="patientSelect">Select Patient:</label>
+  <select id="patientSelect" onchange="loadPatient()">
+    <option value="">-- Choose a patient --</option>
+  </select>
+
+  <div id="patientInfo" class="card" style="display: none;"></div>
+
+  <label for="symptoms">Enter Current Symptoms:</label>
+  <textarea id="symptoms" rows="4" placeholder="e.g., fever, chest pain"></textarea>
+
+  <button onclick="generatePrescription()">Generate Prescription</button>
+
+  <div class="card" id="resultBox" style="display: none;">
+    <h2> Prescription:</h2>
+    <label for="finalPrescription">Edit (optional):</label>
+    <textarea id="finalPrescription" rows="4"></textarea>
+    <button onclick="submitFinal()">Save Final Prescription</button>
+  </div>
+
+  <script>
+    let selectedPatient = null;
+    let generatedPrescription = "";
+
+    async function loadPatients() {
+      try {
+        const res = await fetch("/api/patients");
+        const data = await res.json();
+
+        const select = document.getElementById("patientSelect");
+        data.forEach(p => {
+          const opt = document.createElement("option");
+          opt.value = p.id;
+          opt.textContent = `${p.name} (${p.diagnosis})`;
+          select.appendChild(opt);
+        });
+      } catch (err) {
+        alert("Failed to load patients");
+        console.error(err);
+      }
+    }
+
+    async function loadPatient() {
+      const id = document.getElementById("patientSelect").value;
+      if (!id) return;
+
+      try {
+        const res = await fetch(`/api/patients/${id}`);
+        selectedPatient = await res.json();
+
+        const info = `
+          <strong>Name:</strong> ${selectedPatient.name}<br>
+          <strong>Age:</strong> ${selectedPatient.age}<br>
+          <strong>Diagnosis:</strong> ${selectedPatient.diagnosis}<br>
+          <strong>History:</strong> ${selectedPatient.history.join(", ")}
+        `;
+
+        document.getElementById("patientInfo").innerHTML = info;
+        document.getElementById("patientInfo").style.display = "block";
+      } catch (err) {
+        alert("Error loading patient info");
+        console.error(err);
+      }
+    }
+
+    async function generatePrescription() {
+      const symptoms = document.getElementById("symptoms").value.trim();
+      const patient_id = selectedPatient?.id;
+
+      if (!symptoms || !patient_id) {
+        return alert("Select a patient and enter symptoms");
+      }
+
+      try {
+        const res = await fetch("/api/generate_prescription", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ patient_id, symptoms })
+        });
+
+        if (!res.ok) {
+          const errorText = await res.text();
+          throw new Error(errorText);
+        }
+
+        const data = await res.json();
+        generatedPrescription = data.generated;
+        document.getElementById("finalPrescription").value = data.prescription;
+        document.getElementById("resultBox").style.display = "block";
+      } catch (err) {
+        alert(" Error: " + err.message);
+        console.error(err);
+      }
+    }
+
+    async function submitFinal() {
+      const final = document.getElementById("finalPrescription").value;
+      const symptoms = document.getElementById("symptoms").value.trim();
+      const patient_id = selectedPatient?.id;
+
+      try {
+        const res = await fetch("/api/generate_prescription", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            patient_id,
+            symptoms,
+            final_prescription: final
+          })
+        });
+
+        if (!res.ok) {
+          const errorText = await res.text();
+          throw new Error(errorText);
+        }
+
+        alert("Final prescription saved.");
+      } catch (err) {
+        alert("Save Failed: " + err.message);
+        console.error(err);
+      }
+    }
+
+    loadPatients();
+  </script>
+
+</body>
+</html>

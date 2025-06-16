@@ -1,0 +1,16 @@
+[
+  {
+    "id": "P001",
+    "name": "Raj Verma",
+    "age": 32,
+    "diagnosis": "Hypertension",
+    "history": ["High BP", "Mild chest pain"]
+  },
+  {
+    "id": "P002",
+    "name": "Sneha Shah",
+    "age": 28,
+    "diagnosis": "Diabetes",
+    "history": ["Fatigue", "Blurred vision"]
+  }
+]
