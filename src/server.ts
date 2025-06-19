@@ -1,103 +1,62 @@
+#!/usr/bin/env node
+
 import express from 'express';
 import cors from 'cors';
 import path from 'path';
 import fs from 'fs/promises';
 import { fileURLToPath } from 'url';
-import { GoogleGenAI } from '@google/genai';
 import dotenv from 'dotenv';
-
-// Resolve __dirname in ES modules
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+import { Server as MCPServer } from '@modelcontextprotocol/sdk/server/index.js';
+import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import {
+  CallToolRequestSchema,
+  ListToolsRequestSchema,
+} from '@modelcontextprotocol/sdk/types.js';
+import { GoogleGenAI } from '@google/genai';
 
 dotenv.config();
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-if (!GEMINI_API_KEY) {
-    throw new Error("Missing GEMINI_API_KEY in .env");
-}
+if (!GEMINI_API_KEY) throw new Error('Missing GEMINI_API_KEY in .env');
 
 const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
 
-// Set up Express server
-const app = express();
-const PORT = process.env.PORT || 3000;
-
-// Middleware setup
-app.use(cors({ origin: "*", methods: "*", allowedHeaders: "*" }));
-app.use(express.json());
-
-// static frontend files
-app.use('/ui', express.static(path.join(__dirname, '..', 'public')));
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 interface Patient {
-    id: string;
-    age: number;
-    diagnosis: string;
-    history: string[];
+  id: string;
+  name: string;
+  age: number;
+  diagnosis: string;
+  history: string[];
 }
 
 interface PrescriptionRequest {
-    patient_id: string;
-    symptoms: string;
-    final_prescription?: string;
+  patient_id: string;
+  symptoms: string;
+  final_prescription?: string;
 }
 
-// Load patients data into memory
 let patients: Patient[] = [];
 
-const loadPatients = async () => {
-    try {
-        const patientsData = await fs.readFile(path.join(__dirname, '..', 'app', 'data', 'patients.json'), 'utf-8');
-        patients = JSON.parse(patientsData);
-    } catch (error) {
-        console.error('Error loading patients data:', error);
-        patients = [];
-    }
+const loadPatients = async (): Promise<void> => {
+  try {
+    const data = await fs.readFile(
+      path.join(__dirname, '..', 'app', 'data', 'patients.json'),
+      'utf-8'
+    );
+    patients = JSON.parse(data);
+    console.log("Loaded patients:", patients.map(p => p.name));
+  } catch (err) {
+    console.error("Failed to load patients.json", err);
+    patients = [];
+  }
 };
 
-loadPatients();
+await loadPatients();
 
-// API: Get all patients
-app.get('/api/patients', (req, res) => {
-    res.json(patients);
-});
-
-// API: Get patient by ID
-app.get('/api/patients/:patient_id', (req, res) => {
-    const { patient_id } = req.params;
-    const patient = patients.find(p => p.id === patient_id);
-    if (!patient) {
-        return res.status(404).json({ detail: "Patient not found" });
-    }
-    res.json(patient);
-});
-
-// API: Generate prescription using Gemini
-app.post('/api/generate_prescription', async (req, res) => {
-    try {
-        const { patient_id, symptoms, final_prescription }: PrescriptionRequest = req.body;
-
-        // Validate input
-        if (!symptoms || !patient_id) {
-            return res.status(400).json({ detail: "Symptoms and patient required" });
-        }
-
-        const patient = patients.find(p => p.id === patient_id);
-        if (!patient) {
-            return res.status(404).json({ detail: "Invalid patient ID" });
-        }
-
-        // Read past prescription data for memory
-        let history = "";
-        try {
-            history = await fs.readFile('past_prescriptions.txt', 'utf-8');
-        } catch {
-            history = "";
-        }
-
-        
-        const prompt = `
+const generatePrompt = (patient: Patient, symptoms: string, history: string): string => `
 You are a licensed doctor. Based on the following patient details and symptoms, write a professional, short, and safe prescription using only generic medicine names.
 
 Patient Details:
@@ -107,41 +66,151 @@ Patient Details:
 
 Current Symptoms: ${symptoms}
 
-${history ? `Past data:\n${history}` : ""}
+${history ? `Past data:\n${history}` : ''}
 
 Start the prescription directly. Do not include disclaimers or introductions.
 `;
 
-        // Generate prescription
-        const response = await ai.models.generateContent({
-            model: "gemini-1.5-flash",
-            contents: prompt,
-        });
+const generatePrescription = async (
+  req: PrescriptionRequest
+): Promise<{ generated: string; prescription: string; patient: Patient }> => {
+  const patient = patients.find((p) => p.id === req.patient_id);
+  if (!patient) throw new Error('Invalid patient ID');
 
-        const generated = response.text?.trim() || "";
-        const finalPrescription = final_prescription || generated;
+  let history = '';
+  try {
+    history = await fs.readFile('past_prescriptions.txt', 'utf-8');
+  } catch {}
 
-        // Append to memory file
-        const logEntry = `\nPatient: ${patient_id} | Symptoms: ${symptoms} | Prescription: ${finalPrescription}\n`;
-        await fs.appendFile('past_prescriptions.txt', logEntry, 'utf-8');
+  const prompt = generatePrompt(patient, req.symptoms, history);
 
-        res.json({ generated, prescription: finalPrescription });
+  const response = await ai.models.generateContent({
+    model: 'gemini-1.5-flash',
+    contents: prompt,
+  });
 
-    } catch (error: any) {
-        console.error('Error generating prescription:', error);
+  const generated = response.text?.trim() || '';
+  const finalOutput = req.final_prescription || generated;
 
-        if (error.message?.includes('API')) {
-            return res.status(500).json({ detail: "Gemini API failed: " + error.message });
-        }
+  await fs.appendFile(
+    'past_prescriptions.txt',
+    `\nPatient: ${req.patient_id} | Symptoms: ${req.symptoms} | Prescription: ${finalOutput}\n`,
+    'utf-8'
+  );
 
-        res.status(500).json({ detail: "Unexpected error: " + error.message });
+  return { generated, prescription: finalOutput, patient };
+};
+
+// MCP server for programmatic tool access via LLM agents
+const mcp = new MCPServer({ name: 'prescription-mcp', version: '0.1.0' }, { capabilities: { tools: {} } });
+
+mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
+  tools: [
+    {
+      name: 'get_all_patients',
+      description: 'Get all patients',
+      inputSchema: { type: 'object', properties: {} },
+    },
+    {
+      name: 'get_patient_by_id',
+      description: 'Fetch one patient',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          patient_id: { type: 'string', description: 'Patient ID' },
+        },
+        required: ['patient_id'],
+      },
+    },
+    {
+      name: 'generate_prescription',
+      description: 'Generate prescription from symptoms',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          patient_id: { type: 'string' },
+          symptoms: { type: 'string' },
+          final_prescription: { type: 'string' },
+        },
+        required: ['patient_id', 'symptoms'],
+      },
+    },
+    {
+      name: 'get_prescription_history',
+      description: 'Get prescription log',
+      inputSchema: { type: 'object', properties: {} },
+    },
+  ],
+}));
+
+mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
+  const args = request.params.arguments as Partial<PrescriptionRequest> | undefined;
+  if (!args) return { content: [{ type: 'text', text: 'Missing arguments' }] };
+
+  try {
+    switch (request.params.name) {
+      case 'get_all_patients':
+        return {
+          content: [{ type: 'text', text: JSON.stringify(patients, null, 2) }],
+        };
+      case 'get_patient_by_id': {
+        if (!args.patient_id) throw new Error('patient_id is required');
+        const patient = patients.find((p) => p.id === args.patient_id);
+        if (!patient) throw new Error('Not found');
+        return { content: [{ type: 'text', text: JSON.stringify(patient, null, 2) }] };
+      }
+      case 'generate_prescription': {
+        const result = await generatePrescription(args as PrescriptionRequest);
+        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+      }
+      case 'get_prescription_history': {
+        const history = await fs.readFile('past_prescriptions.txt', 'utf-8').catch(() => '');
+        return { content: [{ type: 'text', text: history || 'No history found.' }] };
+      }
+      default:
+        throw new Error('Unknown tool');
     }
+  } catch (e: unknown) {
+    const err = e as Error;
+    return { content: [{ type: 'text', text: `Error: ${err.message}` }] };
+  }
 });
 
-// Start the server
+mcp.onerror = (err) => console.error('[MCP Error]', err);
+mcp.connect(new StdioServerTransport()).then(() => {
+  console.log('[MCP] Running on stdio');
+});
+
+const app = express();
+app.use(cors());
+app.use(express.json());
+app.use('/ui', express.static(path.join(__dirname, '..', 'public'), { index: 'index.html' }));
+
+app.get('/api/patients', (req, res) => res.json(patients));
+
+app.get('/api/patients/:patient_id', (req, res) => {
+  const patient = patients.find((p) => p.id === req.params.patient_id);
+  if (!patient) return res.status(404).json({ detail: 'Patient not found' });
+  res.json(patient);
+});
+
+app.get('/api/history', async (req, res) => {
+  const history = await fs.readFile('past_prescriptions.txt', 'utf-8').catch(() => '');
+  res.send(history || 'No history');
+});
+
+app.post('/api/generate_prescription', async (req, res) => {
+  const { patient_id, symptoms, final_prescription } = req.body as PrescriptionRequest;
+  try {
+    const result = await generatePrescription({ patient_id, symptoms, final_prescription });
+    res.json(result);
+  } catch (e: unknown) {
+    const err = e as Error;
+    res.status(500).json({ detail: err.message });
+  }
+});
+
+const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-    console.log(`Server running on http://localhost:${PORT}`);
-    console.log(`UI available at http://localhost:${PORT}/ui`);
+  console.log(`[Express] UI on http://localhost:${PORT}/ui`);
 });
-
-export default app;
